@@ -1,55 +1,58 @@
-// 🔐 PUT YOUR API KEY HERE
-const API_KEY = "z0MhmE2ONMjVKhPplhphYnQ6AR7q4lcXkX7q4DazdRlrJaqXlBkhqSK1DnRY";
 const API_BASE = "https://api.pastefy.app";
+const PASTE_ID = "PKzNiJG1";
 
-const pasteIdInput = document.getElementById("pasteId");
+const apiInput = document.getElementById("apiKeyInput");
 const contentArea = document.getElementById("content");
 const statusDiv = document.getElementById("status");
 
-document.getElementById("loadBtn").addEventListener("click", loadPaste);
-document.getElementById("saveBtn").addEventListener("click", patchPaste);
+document.getElementById("saveKeyBtn").onclick = () => {
+    localStorage.setItem("pastefy_api_key", apiInput.value.trim());
+    setStatus("API key saved locally", "green");
+};
+
+document.getElementById("removeKeyBtn").onclick = () => {
+    localStorage.removeItem("pastefy_api_key");
+    apiInput.value = "";
+    setStatus("API key removed", "orange");
+};
+
+document.getElementById("loadBtn").onclick = loadPaste;
+document.getElementById("saveBtn").onclick = patchPaste;
+
+function getKey() {
+    return localStorage.getItem("pastefy_api_key");
+}
 
 async function loadPaste() {
-    const pasteId = pasteIdInput.value.trim();
-    if (!pasteId) {
-        setStatus("Enter a Paste ID", "red");
-        return;
-    }
+    const key = getKey();
+    if (!key) return setStatus("No API key saved", "red");
 
     setStatus("Loading paste...", "black");
 
     try {
-        const res = await fetch(`${API_BASE}/paste/${pasteId}`, {
-            headers: {
-                "Authorization": API_KEY
-            }
+        const res = await fetch(`${API_BASE}/paste/${PASTE_ID}`, {
+            headers: { Authorization: key }
         });
-
-        if (!res.ok) throw new Error("Failed to fetch paste");
 
         const data = await res.json();
         contentArea.value = data.paste.content || "";
         setStatus("Paste loaded!", "green");
-    } catch (err) {
-        console.error(err);
+    } catch (e) {
         setStatus("Error loading paste", "red");
     }
 }
 
 async function patchPaste() {
-    const pasteId = pasteIdInput.value.trim();
-    if (!pasteId) {
-        setStatus("Enter a Paste ID", "red");
-        return;
-    }
+    const key = getKey();
+    if (!key) return setStatus("No API key saved", "red");
 
     setStatus("Saving changes...", "black");
 
     try {
-        const res = await fetch(`${API_BASE}/paste/${pasteId}`, {
+        await fetch(`${API_BASE}/paste/${PASTE_ID}`, {
             method: "PATCH",
             headers: {
-                "Authorization": API_KEY,
+                Authorization: key,
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
@@ -57,16 +60,13 @@ async function patchPaste() {
             })
         });
 
-        if (!res.ok) throw new Error("Failed to update paste");
-
-        setStatus("Paste updated successfully!", "green");
-    } catch (err) {
-        console.error(err);
-        setStatus("Error updating paste", "red");
+        setStatus("Paste updated!", "green");
+    } catch (e) {
+        setStatus("Error saving paste", "red");
     }
 }
 
-function setStatus(message, color) {
-    statusDiv.textContent = message;
+function setStatus(msg, color) {
+    statusDiv.textContent = msg;
     statusDiv.style.color = color;
 }
