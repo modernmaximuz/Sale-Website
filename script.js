@@ -1,5 +1,5 @@
 // 🔐 PUT YOUR API KEY HERE
-const API_KEY = "PASTEFY_API_KEY_HERE";
+const API_KEY = "z0MhmE2ONMjVKhPplhphYnQ6AR7q4lcXkX7q4DazdRlrJaqXlBkhqSK1DnRY";
 const API_BASE = "https://api.pastefy.app";
 
 const pasteIdInput = document.getElementById("pasteId");
