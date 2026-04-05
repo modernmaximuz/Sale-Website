@@ -3,20 +3,25 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>Pastefy Editor</title>
-    <link rel="stylesheet" href="style.css" />
+    <title>Pastefy Web Editor</title>
+    <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
     <div class="container">
-        <h1>Pastefy Paste Editor</h1>
+        <h1>Pastefy Editor (PKzNiJG1)</h1>
 
-        <input type="text" id="pasteId" placeholder="Enter Paste ID" />
+        <div class="api-section">
+            <input type="password" id="apiKeyInput" placeholder="Enter Pastefy API Key"/>
+            <button id="saveKeyBtn">Save Key</button>
+            <button id="removeKeyBtn">Remove Key</button>
+        </div>
+
+        <textarea id="content" placeholder="Paste content..."></textarea>
+
         <div class="buttons">
             <button id="loadBtn">Load Paste</button>
             <button id="saveBtn">Save Changes (PATCH)</button>
         </div>
-
-        <textarea id="content" placeholder="Paste content will appear here..."></textarea>
 
         <div id="status"></div>
     </div>
