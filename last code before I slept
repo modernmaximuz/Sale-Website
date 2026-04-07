@@ -1,0 +1,1195 @@
+index.cjs (backend)
+const MM2_PASTE_ID = "fZ3piaUg";
+const { Client, GatewayIntentBits } = require("discord.js");
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+client.once("ready", () => console.log(`${client.user.tag} is online!`));
+client.login(process.env.DISCORD_BOT_TOKEN);
+
+const fetch = (...args) =>
+  import("node-fetch").then(({default: fetch}) => fetch(...args));
+const express = require("express");
+const admin = require("firebase-admin");
+
+if (!process.env.FIREBASE_KEY) {
+    throw new Error("FIREBASE_KEY is missing in environment variables");
+}
+
+const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+const crypto = require("crypto");
+const app = express();
+app.use(express.json());
+app.use(express.static("public"));
+app.get("/*", (req, res, next) => {
+    const path = req.params[0];
+
+    // skip API routes
+if (
+    path.startsWith("auth") ||
+    path === "me" ||
+    path.startsWith("load") ||
+    path.startsWith("save")
+) {
+    return next();
+}
+    const filePath = __dirname + "/public/" + path + ".html";
+
+    res.sendFile(filePath, (err) => {
+        if (err) next();
+    });
+});
+
+function parseCookies(req) {
+    const list = {};
+    const rc = req.headers.cookie;
+    if (!rc) return list;
+
+    rc.split(";").forEach(cookie => {
+        const parts = cookie.split("=");
+        list[parts.shift().trim()] = decodeURI(parts.join("="));
+    });
+
+    return list;
+}
+
+const SECRET = "hades-secret";
+
+function sign(data) {
+    return crypto
+        .createHmac("sha256", SECRET)
+        .update(data)
+        .digest("hex");
+}
+
+async function verifyToken(req, res, next) {
+    const header = req.headers.authorization;
+
+    if (!header || !header.startsWith("Bearer ")) {
+        return res.status(401).send("Unauthorized");
+    }
+
+    const token = header.split("Bearer ")[1];
+
+    try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.user = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).send("Invalid token");
+    }
+}
+
+const API_KEY = process.env.API_KEY;
+const PASTE_ID = "PKzNiJG1";
+const BASE = "https://pastefy.app/api/v2";
+
+// Load paste
+app.get("/load/:id", async (req, res) => {
+    const pasteId = req.params.id;
+
+    const r = await fetch(`${BASE}/paste/${pasteId}`, {
+        headers: { Authorization: `Bearer ${API_KEY}` }
+    });
+
+    const json = await r.json();   // ✅ NOT text
+    res.status(r.status).json(json);  // ✅ send JSON
+});
+
+// Save paste
+app.put("/save/:id", verifyToken, async (req, res) => {
+    const pasteId = req.params.id;
+
+    const r = await fetch(`${BASE}/paste/${pasteId}`, {
+        method: "PUT",
+        headers: {
+            Authorization: `Bearer ${API_KEY}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            content: req.body.content
+        })
+    });
+
+    const text = await r.text();
+    res.status(r.status).send(text);
+});
+
+app.listen(process.env.PORT || 3000, () =>
+    console.log("Server running")
+);
+
+// Discord callback
+app.get("/auth/discord/callback", async (req, res) => {
+    try {
+        const code = req.query.code;
+
+        const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+                client_id: process.env.DISCORD_CLIENT_ID,
+                client_secret: process.env.DISCORD_CLIENT_SECRET,
+                grant_type: "authorization_code",
+                code,
+                redirect_uri: process.env.DISCORD_REDIRECT
+            })
+        });
+
+        const tokenData = await tokenRes.json();
+
+        const userRes = await fetch("https://discord.com/api/users/@me", {
+            headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        });
+
+        const user = await userRes.json();
+
+        // Force join guild & assign role
+        await fetch(`https://discord.com/api/guilds/${process.env.DISCORD_GUILD_ID}/members/${user.id}`, {
+            method: "PUT",
+            headers: {
+                Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ access_token: tokenData.access_token })
+        });
+
+        await fetch(`https://discord.com/api/guilds/${process.env.DISCORD_GUILD_ID}/members/${user.id}/roles/${process.env.DISCORD_ROLE_ID}`, {
+            method: "PUT",
+            headers: { Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}` }
+        });
+
+        // Prepare cookie
+        const payload = JSON.stringify({
+            id: user.id,
+            username: user.username,
+            avatar: user.avatar
+        });
+        const signature = sign(payload);
+        const domain = req.hostname; // just the host
+        const isLocalhost = domain === "localhost" || domain === "127.0.0.1";
+
+        const cookie = `discord=${Buffer.from(payload).toString("base64")}.${signature}; Path=/; HttpOnly; SameSite=${isLocalhost ? 'Lax' : 'None'};${!isLocalhost ? ' Secure;' : ''}${!isLocalhost ? ` Domain=${domain}` : ''}`;
+
+        res.setHeader("Set-Cookie", cookie);
+        res.redirect("/");
+
+    } catch (err) {
+        console.error("Discord callback error:", err);
+        res.status(500).send("Internal Server Error");
+    }
+});
+
+const BASE_DISCORD = "https://discord.com/api";
+
+// Step A — Redirect user to Discord
+app.get("/auth/discord", (req, res) => {
+    const params = new URLSearchParams({
+        client_id: process.env.DISCORD_CLIENT_ID,
+        response_type: "code",
+        redirect_uri: process.env.DISCORD_REDIRECT,
+        scope: "identify guilds.join"
+    });
+
+    res.redirect(`https://discord.com/oauth2/authorize?${params.toString()}`);
+});
+
+app.get("/me", (req, res) => {
+    const cookies = parseCookies(req);
+    if (!cookies.discord) return res.json(null);
+
+    const [data, sig] = cookies.discord.split(".");
+    const payload = Buffer.from(data, "base64").toString();
+
+    if (sign(payload) !== sig) return res.json(null);
+
+    res.json(JSON.parse(payload));
+});
+
+// Logout Discord
+app.get("/logout-discord", (req, res) => {
+    const domain = req.hostname;
+    const isLocalhost = domain === "localhost" || domain === "127.0.0.1";
+
+    const cookie = `discord=; Path=/; Max-Age=0; HttpOnly; SameSite=${isLocalhost ? 'Lax' : 'None'};${!isLocalhost ? ' Secure;' : ''}${!isLocalhost ? ` Domain=${domain}` : ''}`;
+
+    res.setHeader("Set-Cookie", cookie);
+    res.redirect("/");
+});
+
+
+
+
+
+
+
+
+
+
+/public/
+index.html (frontend)
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Paste Editor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="topbar">
+    <a href="/">
+        <img src="/images/logo.png" class="logo">
+    </a>
+
+    <!-- CENTER NAVIGATION -->
+    <div id="navCenter">
+        <button class="navBtn">Restocks</button>
+
+        <div class="dropdown">
+    <button class="navBtn" id="shopToggle">Shop ▾</button>
+    <div class="dropdownContent" id="shopMenu">
+                <a href="/shop/adoptme">Adopt Me</a>
+                <a href="/shop/mm2">Murder Mystery</a>
+            </div>
+        </div>
+
+        <button class="navBtn">Proofs</button>
+        <button class="navBtn">Support</button>
+    </div>
+
+    <div id="navRight">
+        <button id="discordBtn" onclick="window.location='/auth/discord'">Discord</button>
+        <button id="loginToggle" onclick="window.location='/login.html'">Login</button>
+
+        <div id="profileBox" class="hidden">
+            <div id="profileMain">
+                <div class="avatar"></div>
+                <span id="profileName">User</span>
+            </div>
+            <div id="profileDropdown" class="hidden">
+                <button id="logoutBtn">Logout</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<link rel="stylesheet" href="navbar.css">
+<script src="navbar.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+
+<script src="firebase.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
+
+
+
+
+script.js
+// Set Firebase session persistence
+firebase.auth().setPersistence(firebase.auth.Auth.Persistence.SESSION);
+
+// DOM elements
+const profileBox = document.getElementById("profileBox");
+const profileName = document.getElementById("profileName");
+const profileDropdown = document.getElementById("profileDropdown");
+const profileMain = document.getElementById("profileMain");
+const loginToggle = document.getElementById("loginToggle");
+const discordBtn = document.getElementById("discordBtn");
+const editor = document.getElementById("editor");
+const content = document.getElementById("content");
+
+let token = null;
+let saveTimeout = null;
+let currentData = {};
+
+// ------------------ PROFILE UI HELPER ------------------
+function showProfile(user, type) {
+    profileBox.classList.remove("hidden");
+    if (loginToggle) loginToggle.style.display = "none";
+    if (discordBtn) discordBtn.style.display = "none";
+
+    const avatar = document.querySelector(".avatar");
+
+    if (type === "discord") {
+        profileName.textContent = user.username;
+        if (avatar) {
+            avatar.style.backgroundImage = `url(https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png)`;
+            avatar.style.backgroundSize = "cover";
+        }
+    } else {
+        profileName.textContent = user.email;
+        if (avatar) {
+            avatar.style.backgroundImage = "";
+        }
+    }
+}
+
+function resetUI() {
+    profileBox.classList.add("hidden");
+    if (loginToggle) loginToggle.style.display = "inline-block";
+    if (discordBtn) discordBtn.style.display = "inline-block";
+    if (editor) editor.style.display = "none";
+}
+
+// ------------------ DISCORD LOGIN ------------------
+async function initDiscordUI() {
+    try {
+        const res = await fetch("/me");
+        const user = await res.json();
+        if (!user) return;
+
+        // If Firebase is logged in, log it out
+        if (firebase.auth().currentUser) {
+            await firebase.auth().signOut();
+        }
+
+        showProfile(user, "discord");
+    } catch (err) {
+        console.error("Discord UI init error:", err);
+    }
+}
+initDiscordUI();
+
+// ------------------ FIREBASE LOGIN ------------------
+firebase.auth().onAuthStateChanged(async (user) => {
+    if (!user) return;
+
+    try {
+        // Clear Discord cookie if Firebase logs in
+        await fetch("/logout-discord");
+
+        token = await user.getIdToken();
+
+        showProfile(user, "firebase");
+
+    } catch (err) {
+        console.error("Auth state change error:", err);
+    }
+});
+
+// ------------------ LOGOUT ------------------
+document.getElementById("logoutBtn").onclick = async () => {
+    try {
+        if (firebase.auth().currentUser) {
+            await firebase.auth().signOut();
+        }
+
+        await fetch("/logout-discord");
+
+        resetUI();
+    } catch (err) {
+        console.error("Logout error:", err);
+    }
+};
+
+// ------------------ PROFILE DROPDOWN ------------------
+profileMain?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    profileDropdown.classList.toggle("hidden");
+});
+
+document.addEventListener("click", () => {
+    profileDropdown.classList.add("hidden");
+});
+
+// ===== GLOBAL AUTH CHECK (used by navbar & pages) =====
+window.isLoggedIn = async function () {
+    // Check Firebase
+    if (firebase.auth().currentUser) return true;
+
+    // Check Discord cookie
+    const res = await fetch("/me");
+    const user = await res.json();
+    return !!user;
+};
+
+
+
+
+
+style.css
+/* Topbar */
+#topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    background: rgba(10,10,15,0.95);
+    backdrop-filter: blur(10px);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 25px;
+    border-bottom: 1px solid #1f1f2b;
+    z-index: 999;
+    flex-wrap: wrap;
+}
+
+#profileDropdown {
+    position: absolute;
+    top: 110%;
+    right: 0;
+    background: #121216;
+    border: 1px solid #2a2a3a;
+    border-radius: 8px;
+    padding: 10px;
+    min-width: 120px;
+    z-index: 2000; /* ✅ add this */
+}
+
+/* Logo */
+#logo {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: #4c8dff;
+}
+
+.logo {
+    height: 55px;   /* increase this freely */
+}
+/* Right side */
+#navRight {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* Buttons */
+#navRight button {
+    background: transparent;
+    border: 1px solid #2a2a3a;
+    padding: 6px 14px;
+    border-radius: 6px;
+}
+
+#navRight button:hover {
+    background: #4c8dff;
+}
+
+/* Profile box */
+#profileBox {
+    position: relative;
+    cursor: pointer;
+}
+
+/* Profile main */
+#profileMain {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid #2a2a3a;
+    border-radius: 8px;
+}
+
+/* Avatar circle */
+.avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: #555; /* placeholder */
+}
+
+/* Dropdown */
+#profileDropdown {
+    position: absolute;
+    top: 110%;
+    right: 0;
+    background: #121216;
+    border: 1px solid #2a2a3a;
+    border-radius: 8px;
+    padding: 10px;
+    min-width: 120px;
+}
+
+/* Hidden helper */
+.hidden {
+    display: none !important;
+}
+
+}
+
+/* Base */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Arial, sans-serif;
+}
+
+body {
+    background: #0b0b0d;
+    color: #eaeaea;
+    min-height: 100vh;
+    padding-top: 70px;
+}
+
+/* Containers */
+#loginBox, #editor {
+    background: #121216;
+    padding: 40px;
+    width: 90%;
+    max-width: 900px;
+    border-radius: 14px;
+    box-shadow: 0 0 60px rgba(0,0,0,0.6);
+    animation: fadeIn 0.6s ease forwards;
+}
+
+/* Headings */
+h1, h2 {
+    margin-bottom: 20px;
+    font-weight: 500;
+    letter-spacing: 1px;
+}
+
+/* Inputs */
+input {
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 12px;
+    border-radius: 8px;
+    border: 1px solid #222;
+    background: #0f0f13;
+    color: white;
+    outline: none;
+    transition: border 0.3s ease, box-shadow 0.3s ease;
+}
+
+input:focus {
+    border: 1px solid #4c8dff;
+    box-shadow: 0 0 8px rgba(76,141,255,0.6);
+}
+
+/* Textarea */
+textarea {
+    width: 100%;
+    height: 400px;
+    background: #0f0f13;
+    color: #eaeaea;
+    border: 1px solid #222;
+    border-radius: 10px;
+    padding: 15px;
+    resize: none;
+    margin-bottom: 15px;
+    font-family: monospace;
+    font-size: 14px;
+    transition: border 0.3s ease, box-shadow 0.3s ease;
+}
+
+textarea:focus {
+    border: 1px solid #4c8dff;
+    box-shadow: 0 0 10px rgba(76,141,255,0.5);
+}
+
+/* Buttons */
+button {
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: none;
+    background: #1a1a22;
+    color: #eaeaea;
+    cursor: pointer;
+    margin-right: 8px;
+    transition: all 0.25s ease;
+}
+
+button:hover {
+    background: #4c8dff;
+    color: #fff;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(76,141,255,0.4);
+}
+
+/* Error text */
+#error {
+    margin-top: 10px;
+    color: #ff6b6b;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(15px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+#header {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+}
+
+* {
+    transition: background 0.3s ease, transform 0.3s ease, opacity 0.3s ease;
+}
+
+.card, .navBtn, button {
+    transition: all 0.3s cubic-bezier(.2,.8,.2,1);
+}
+
+
+
+
+
+navbar.js
+window.addEventListener("load", () => {
+
+    const MAX_WARNINGS = 5;
+    let warningQueue = [];
+
+    async function requireLogin(e, goTo, btn) {
+        e.preventDefault();
+
+        let ok = false;
+
+        if (window.isLoggedIn) {
+            ok = await window.isLoggedIn();
+        } else {
+            try {
+                const res = await fetch("/me");
+                const user = await res.json();
+                ok = !!user;
+            } catch {
+                ok = false;
+            }
+        }
+
+        if (!ok) {
+            // Shake the button
+            if (btn) {
+                btn.classList.add("shake");
+                setTimeout(() => btn.classList.remove("shake"), 400);
+            }
+
+            // Show login warning (max 5 at a time)
+            if (warningQueue.length >= MAX_WARNINGS) {
+                const oldest = warningQueue.shift();
+                oldest.remove();
+            }
+
+            const warn = document.createElement("div");
+            warn.className = "loginWarn";
+            warn.innerText = "🚨 Please login first!";
+            warn.style.bottom = `${warningQueue.length * 60 + 20}px`; // stack vertically
+            document.body.appendChild(warn);
+            warningQueue.push(warn);
+
+            setTimeout(() => {
+                warn.remove();
+                warningQueue = warningQueue.filter(w => w !== warn);
+                // reposition remaining warnings
+                warningQueue.forEach((w, i) => {
+                    w.style.bottom = `${i * 60 + 20}px`;
+                });
+            }, 5000);
+
+            return false;
+        }
+
+        if (goTo) window.location.href = goTo;
+        return true;
+    }
+
+    // Buttons
+    document.querySelectorAll(".navBtn").forEach(btn => {
+        const text = btn.textContent.trim();
+
+        if (text === "Restocks")
+            btn.addEventListener("click", (e) => requireLogin(e, "/restocks", btn));
+
+        if (text === "Proofs")
+            btn.addEventListener("click", (e) => requireLogin(e, "/proofs", btn));
+
+        if (text === "Support")
+            btn.addEventListener("click", (e) => requireLogin(e, "/support", btn));
+    });
+
+    // Shop links
+    document.querySelectorAll("#shopMenu a").forEach(a => {
+        a.addEventListener("click", (e) => requireLogin(e, a.getAttribute("href"), a));
+    });
+
+    // Dropdown toggle
+    const shopToggle = document.getElementById("shopToggle");
+    const shopMenu = document.getElementById("shopMenu");
+
+    shopToggle.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const ok = await requireLogin(e, null, shopToggle);
+        if (ok) {
+            shopMenu.style.display = shopMenu.style.display === "block" ? "none" : "block";
+        }
+    });
+
+    document.addEventListener("click", () => {
+        shopMenu.style.display = "none";
+    });
+
+    // Auto redirect to home if user logs out while on protected page
+    const protectedPages = ["/restocks", "/proofs", "/support", "/shop/mm2"];
+    firebase.auth().onAuthStateChanged(async (user) => {
+        if (!user) {
+            const loggedIn = await window.isLoggedIn();
+            if (!loggedIn && protectedPages.includes(window.location.pathname)) {
+                window.location.href = "/";
+            }
+        }
+    });
+
+});
+
+
+
+
+
+navbar.css
+.loginWarn {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #ff4d4d;
+    color: white;
+    padding: 14px 28px;
+    border-radius: 12px;
+    font-weight: 600;
+    z-index: 5000;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    opacity: 0.95;
+    transition: bottom 0.3s ease;
+}
+
+
+
+
+
+login.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login - Hades</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div id="loginBox">
+        <h1>Login</h1>
+
+        <input type="email" id="email" placeholder="Email" />
+        <input type="password" id="password" placeholder="Password" />
+
+        <button id="loginBtn">Login</button>
+        <button id="discordLogin">Login with Discord</button>
+
+        <p id="error"></p>
+    </div>
+
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+    <script src="/firebase.js"></script>
+    <script src="/login.js"></script>
+</body>
+</html>
+
+
+
+
+
+login.js
+firebase.auth().setPersistence(firebase.auth.Auth.Persistence.SESSION);
+
+const emailInput = document.getElementById("email");
+const passInput = document.getElementById("password");
+const loginBtn = document.getElementById("loginBtn");
+const discordBtn = document.getElementById("discordLogin");
+const errorP = document.getElementById("error");
+
+loginBtn.onclick = async () => {
+    try {
+        await firebase.auth().signInWithEmailAndPassword(
+            emailInput.value,
+            passInput.value
+        );
+
+        // redirect to home/editor after login
+        window.location.href = "/";
+    } catch (err) {
+        errorP.textContent = err.message;
+    }
+};
+
+discordBtn.onclick = () => {
+    window.location.href = "/auth/discord";
+};
+
+// Optional: redirect if already logged in
+firebase.auth().onAuthStateChanged(user => {
+    if (user) {
+        window.location.href = "/";
+    }
+});
+
+
+
+
+
+
+
+
+
+/public/shop/
+mm2.html
+<!DOCTYPE html>
+
+<html>
+<head>
+    <title>MM2 Stock</title>
+
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/navbar.css">
+<link rel="stylesheet" href="/shop/mm2.css">
+
+</head>
+<body>
+
+<div id="topbar">
+    <a href="/">
+        <img src="/images/logo.png" class="logo">
+    </a>
+    
+<div id="navCenter">
+    <button class="navBtn">Restocks</button>
+
+    <div class="dropdown">
+        <button class="navBtn" id="shopToggle">Shop ▾</button>
+        <div class="dropdownContent" id="shopMenu">
+            <a href="/shop/adoptme">Adopt Me</a>
+            <a href="/shop/mm2">Murder Mystery</a>
+        </div>
+    </div>
+
+    <button class="navBtn">Proofs</button>
+    <button class="navBtn">Support</button>
+</div>
+
+<div id="navRight">
+    <button id="discordBtn" onclick="window.location='/auth/discord'">Discord</button>
+    <button id="loginToggle">Login</button>
+
+    <div id="profileBox" class="hidden">
+        <div id="profileMain">
+            <div class="avatar"></div>
+            <span id="profileName">User</span>
+        </div>
+        <div id="profileDropdown" class="hidden">
+            <button id="logoutBtn">Logout</button>
+        </div>
+    </div>
+</div>
+
+</div>
+
+<h1 style="text-align:center;">MM2 Stock</h1> <div id="searchContainer">
+    <input type="text" id="searchInput" placeholder="Search items..." />
+</div>
+
+<div id="stockContainer"></div>
+<div id="pagination" class="pagination">
+    <button id="prevPage">◀ Prev</button>
+    <span id="pageInfo">Page 1</span>
+    <button id="nextPage">Next ▶</button>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="/firebase.js"></script>
+
+<script src="/script.js"></script>
+<script src="/navbar.js"></script>
+<script src="/shop/mm2.js"></script>
+
+</body>
+</html>
+
+
+
+
+
+mm2.js
+(() => {
+const PASTE_ID = "fZ3piaUg";
+
+let token = null;
+let isAdmin = false;
+let dataCache = {};
+
+let currentPage = 1;
+const ITEMS_PER_PAGE = 84;
+
+// ---------------- AUTH ----------------
+firebase.auth().onAuthStateChanged(async (user) => {
+    if (user) {
+        token = await user.getIdToken();
+        isAdmin = true;
+        await fetch("/logout-discord");
+    } else {
+        token = null;
+        isAdmin = false;
+    }
+    await loadStock();
+});
+
+async function initDiscord() {
+    const res = await fetch("/me");
+    const user = await res.json();
+    if (user) isAdmin = false;
+    await loadStock();
+}
+initDiscord();
+
+// ---------------- LOAD ----------------
+async function loadStock() {
+    try {
+        const res = await fetch(`/load/${PASTE_ID}`, {
+            headers: token ? { Authorization: "Bearer " + token } : {}
+        });
+
+        const json = await res.json();
+        if (!json.content) return;
+
+        dataCache = JSON.parse(json.content);
+        render();
+
+    } catch (err) {
+        console.error("Load failed:", err);
+    }
+}
+
+// ---------------- RENDER ----------------
+function render() {
+    const container = document.getElementById("stockContainer");
+    container.innerHTML = "";
+
+    const search = document.getElementById("searchInput")?.value.toLowerCase() || "";
+    const mm2 = dataCache.mm2 || {};
+
+    let items = Object.entries(mm2).filter(([name, d]) =>
+        d.stock > 0 && name.toLowerCase().includes(search)
+    );
+
+    const totalPages = Math.ceil(items.length / ITEMS_PER_PAGE);
+    if (currentPage > totalPages) currentPage = totalPages || 1;
+
+    const start = (currentPage - 1) * ITEMS_PER_PAGE;
+    const paged = items.slice(start, start + ITEMS_PER_PAGE);
+
+    for (let [name, d] of paged) {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+            <div class="imgBox"><img src="${d.img}"></div>
+            <div class="info"><span class="name">${name}</span></div>
+        `;
+
+        const info = card.querySelector(".info");
+
+        if (isAdmin) {
+            const s = document.createElement("input");
+            s.type = "number";
+            s.value = d.stock;
+            s.onchange = async () => {
+                dataCache.mm2[name].stock = +s.value;
+                await saveStock();
+            };
+            info.appendChild(s);
+
+            const p = document.createElement("input");
+            p.type = "number";
+            p.step = "0.01";
+            p.value = d.price;
+            p.onchange = async () => {
+                dataCache.mm2[name].price = +p.value;
+                await saveStock();
+            };
+            info.appendChild(p);
+        } else {
+            info.innerHTML += `<div class="stock">Stock: ${d.stock}</div>
+                               <div class="price">₱${d.price}</div>`;
+        }
+
+        container.appendChild(card);
+    }
+
+    document.getElementById("pageInfo").textContent =
+        `Page ${currentPage} of ${totalPages}`;
+}
+
+// ---------------- SAVE ----------------
+async function saveStock() {
+    if (!isAdmin) return;
+
+    await fetch(`/save/${PASTE_ID}`, {
+        method: "PUT",
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ content: JSON.stringify(dataCache, null, 2) })
+    });
+
+    render();
+}
+
+// ---------------- EVENTS ----------------
+document.getElementById("searchInput")?.addEventListener("input", () => {
+    currentPage = 1;
+    render();
+});
+
+document.getElementById("prevPage")?.addEventListener("click", () => {
+    if (currentPage > 1) {
+        currentPage--;
+        render();
+    }
+});
+
+document.getElementById("nextPage")?.addEventListener("click", () => {
+    currentPage++;
+    render();
+});
+
+// Auto refresh viewers
+setInterval(() => {
+    if (!isAdmin) loadStock();
+}, 5000);
+
+})();
+
+
+
+
+
+
+
+mm2.css
+#stockContainer {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 25px;
+    padding: 20px 40px;  /* added top padding */
+}
+
+/* Ensure cards wrap correctly */
+.card {
+    display: flex;
+    flex-direction: column;
+    background: #14141c;
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid #2a2a3a;
+}
+
+.card:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+}
+
+.imgBox {
+    position: relative;
+    height: 180px;
+    overflow: hidden;
+}
+
+.imgBox img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: 0.4s ease;
+}
+
+.card:hover img {
+    transform: scale(1.08);
+}
+
+.price, .stock-label {
+    background: #4c8dff;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-weight: bold;
+    margin-top: 8px;
+    display: inline-block;
+}
+
+.info {
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.name {
+    font-weight: 600;
+    font-size: 16px;
+    color: #eaeaea;
+}
+
+.stock {
+    font-size: 14px;
+    color: #aaa;
+}
+
+input.stock-input, input.price-input {
+    width: 100%;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid #2a2a3a;
+    background: #0f0f13;
+    color: white;
+    font-size: 14px;
+}
+
+#searchContainer {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 20px;
+}
+
+#searchInput {
+    width: 100%;
+    max-width: 400px;
+    padding: 12px 16px;
+    border-radius: 10px;
+    border: 1px solid #2a2a3a;
+    background: #0f0f13;
+    color: white;
+    font-size: 16px;
+}
+
+.pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 20px;
+    margin: 30px 0 50px;
+}
+
+.pagination button {
+    padding: 10px 18px;
+    border-radius: 10px;
+    background: #1a1a22;
+    border: 1px solid #2a2a3a;
+    cursor: pointer;
+}
+
+.pagination button:hover {
+    background: #4c8dff;
+}
