@@ -305,14 +305,25 @@ type: ChannelType.GuildText,
         ]
     });
 
-    channel.send("Order:\n" + JSON.stringify(order.items, null, 2));
+    let total = 0;
+
+let msg = `🧾 **Order Summary**\n\n`;
+
+order.items.forEach(i=>{
+    const subtotal = i.price * i.qty;
+    total += subtotal;
+
+    msg += `• ${i.name} x${i.qty} = ₱${subtotal}\n`;
+});
+
+msg += `\n💰 **Total: ₱${total}**`;
+
+channel.send(msg);
 }
 
 client.login(process.env.ORDER_BOT_TOKEN);
 
 module.exports = { createOrderChannel };
-
-
 
 
 
@@ -358,9 +369,19 @@ index.html (frontend)
     <div id="navRight">
         <button id="discordBtn" onclick="window.location='/auth/discord'">Discord</button>
         <button id="loginToggle" onclick="window.location='/login.html'">Login</button>
-<div id="cartIcon" onclick="location.href='/tabs/orders'">
+<div id="cartIcon">
     <img src="/images/cart.png" id="cartImg">
     <span id="cartCount">0</span>
+</div>
+<div id="cartPopup" class="hidden">
+    <div id="cartBox">
+        <h2>Your Cart</h2>
+        <div id="cartItems"></div>
+
+        <div id="cartTotal">Total: ₱0</div>
+
+        <button id="finalizeOrder">Finalize Order</button>
+    </div>
 </div>
 <script src="/cart.js"></script>
         <div id="profileBox" class="hidden">
@@ -771,6 +792,62 @@ button:hover {
     object-fit:cover;
 }
 
+#cartPopup {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    z-index:9999;
+}
+
+#cartBox {
+    background:#121216;
+    padding:20px;
+    width:400px;
+    max-height:80vh;
+    overflow:auto;
+    border-radius:12px;
+}
+
+#cartItems {
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    margin:10px 0;
+}
+
+.cartRow {
+    display:flex;
+    align-items:center;
+    gap:10px;
+}
+
+.cartRow img {
+    width:30px;
+    height:30px;
+}
+
+.stockHint {
+    opacity:0.5;
+    font-size:12px;
+}
+
+#cartTotal {
+    margin-top:10px;
+    font-weight:bold;
+}
+
+.addCartBtn {
+    padding:6px 10px;
+    background:#4c8dff;
+    border:none;
+    border-radius:6px;
+    cursor:pointer;
+}
+
+
 
 
 
@@ -826,6 +903,85 @@ if (countEl) countEl.innerText = count;
 
 window.addEventListener("load", renderCartIcon);
 
+const popup = document.getElementById("cartPopup");
+
+document.getElementById("cartIcon")?.addEventListener("click", () => {
+    popup.classList.remove("hidden");
+    renderCartPopup();
+});
+
+popup?.addEventListener("click", (e) => {
+    if (e.target.id === "cartPopup") {
+        popup.classList.add("hidden");
+    }
+});
+
+function renderCartPopup() {
+    const cart = getCart();
+    const box = document.getElementById("cartItems");
+    const totalEl = document.getElementById("cartTotal");
+
+    if (!box) return;
+
+    box.innerHTML = "";
+    let total = 0;
+
+    cart.forEach(i => {
+        const subtotal = i.price * i.qty;
+        total += subtotal;
+
+        box.innerHTML += `
+        <div class="cartRow">
+            <img src="${i.img}">
+            <div>
+                ${i.name} x${i.qty}<br>
+                <span class="stockHint">Stock info shown here</span>
+            </div>
+            <div>₱${subtotal}</div>
+        </div>
+        `;
+    });
+
+    totalEl.innerText = `Total: ₱${total}`;
+}
+
+document.getElementById("finalizeOrder")?.addEventListener("click", async () => {
+    const user = await (await fetch("/me")).json();
+    const cart = getCart();
+
+    if (!cart.length) {
+        alert("Cart is empty!");
+        return;
+    }
+
+    const order = {
+        user: user.username,
+        discordId: user.id,
+        date: new Date().toISOString(),
+        items: cart,
+        status: "pending"
+    };
+
+    await fetch(`/load/OQooMS9z`)
+        .then(res => res.json())
+        .then(async json => {
+            const data = JSON.parse(json.content || "[]");
+            data.push(order);
+
+            await fetch(`/save/OQooMS9z`, {
+                method:"PUT",
+                headers:{ "Content-Type":"application/json" },
+                body: JSON.stringify({
+                    content: JSON.stringify(data,null,2)
+                })
+            });
+        });
+
+    localStorage.removeItem("hades_cart");
+    alert("Order placed!");
+
+    location.href = "/tabs/orders"; // now THIS is correct usage
+});
 
 
 
@@ -1073,9 +1229,20 @@ mm2.html
 <div id="navRight">
     <button id="discordBtn" onclick="window.location='/auth/discord'">Discord</button>
     <button id="loginToggle">Login</button>
-<div id="cartIcon" onclick="location.href='/tabs/orders'">
+<div id="cartIcon">
     <img src="/images/cart.png" id="cartImg">
     <span id="cartCount">0</span>
+</div>
+
+<div id="cartPopup" class="hidden">
+    <div id="cartBox">
+        <h2>Your Cart</h2>
+        <div id="cartItems"></div>
+
+        <div id="cartTotal">Total: ₱0</div>
+
+        <button id="finalizeOrder">Finalize Order</button>
+    </div>
 </div>
 <script src="/cart.js"></script>
     <div id="profileBox" class="hidden">
@@ -1227,10 +1394,10 @@ card.innerHTML = `
     <div class="stock">Stock: ${d.stock}</div>
     <div class="price">₱${d.price}</div>
     <input type="number" min="1" value="1" class="qtyInput">
-<img src="/images/cart.png" class="addCart">
+<button class="addCartBtn">Add to Cart</button>
 `;
 
-const btn = info.querySelector(".addCart");
+const btn = info.querySelector(".addCartBtn");
 const qtyInput = info.querySelector(".qtyInput");
 
 btn.onclick = () => {
@@ -1445,7 +1612,7 @@ orders.html
 
 
 
-order.js
+orders.js
 const ORDER_PASTE = "OQooMS9z";
 
 function renderCart() {
@@ -1493,6 +1660,18 @@ document.getElementById("placeOrder").onclick = async () => {
     localStorage.removeItem("hades_cart");
     alert("Order placed!");
 };
+
+async function acceptOrder(i){
+    const o = window._orders[i];
+
+    await fetch("/accept-order",{
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(o)
+    });
+
+    alert("Order accepted!");
+}
 
 async function loadOrders() {
     const res = await fetch(`/load/${ORDER_PASTE}`);
