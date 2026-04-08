@@ -23,7 +23,7 @@ admin.initializeApp({
 
 const crypto = require("crypto");
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static("public"));
 app.get("/*", (req, res, next) => {
     const path = req.params[0];
@@ -37,7 +37,7 @@ if (
 ) {
     return next();
 }
-    const filePath = __dirname + "/public/" + path + ".html";
+    const filePath = __dirname + "/public/" + path + (path.includes(".") ? "" : ".html");
 
     res.sendFile(filePath, (err) => {
         if (err) next();
@@ -104,15 +104,24 @@ app.get("/load/:id", async (req, res) => {
 app.put("/save/:id", verifyToken, async (req, res) => {
     const pasteId = req.params.id;
 
+    // STEP 1 — get current paste
+    const current = await fetch(`${BASE}/paste/${pasteId}`, {
+        headers: { Authorization: `Bearer ${API_KEY}` }
+    });
+
+    const paste = await current.json();
+
+    // STEP 2 — replace content only
+    paste.content = req.body.content;
+
+    // STEP 3 — send FULL paste object back
     const r = await fetch(`${BASE}/paste/${pasteId}`, {
         method: "PUT",
         headers: {
             Authorization: `Bearer ${API_KEY}`,
             "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-            content: req.body.content
-        })
+        body: JSON.stringify(paste)
     });
 
     const text = await r.text();
@@ -221,6 +230,91 @@ app.get("/logout-discord", (req, res) => {
     res.redirect("/");
 });
 
+const { createOrderChannel } = require("./orderBot");
+
+app.post("/accept-order", async (req,res)=>{
+    const order = req.body;
+    await createOrderChannel(order);
+    res.send("ok");
+});
+
+async function acceptOrder(i){
+    const o = window._orders[i];
+    await fetch("/accept-order",{
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify(o)
+    });
+}
+
+
+
+
+
+
+bot.js (backend)
+const { Client, GatewayIntentBits } = require("discord.js");
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers
+    ]
+});
+
+client.once("ready", () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+});
+
+client.login(process.env.DISCORD_BOT_TOKEN);
+
+
+
+
+
+orderBot.js (backend)
+const { Client, GatewayIntentBits, PermissionsBitField, ChannelType } = require("discord.js");
+
+const client = new Client({
+    intents:[GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+});
+
+client.on("ready", ()=>console.log("Order bot ready"));
+
+async function createOrderChannel(order) {
+    const guild = await client.guilds.fetch(process.env.GUILD_ID);
+    const member = await guild.members.fetch(order.discordId);
+
+    const channel = await guild.channels.create({
+        name: `${order.user}-customer`,
+type: ChannelType.GuildText,
+        parent: "1491299595018305566",
+        permissionOverwrites: [
+            {
+                id: guild.id,
+                deny: [PermissionsBitField.Flags.ViewChannel]
+            },
+            {
+                id: member.id,
+                allow: [
+                    PermissionsBitField.Flags.ViewChannel,
+                    PermissionsBitField.Flags.SendMessages,
+                    PermissionsBitField.Flags.AttachFiles
+                ]
+            }
+        ]
+    });
+
+    channel.send("Order:\n" + JSON.stringify(order.items, null, 2));
+}
+
+client.login(process.env.ORDER_BOT_TOKEN);
+
+module.exports = { createOrderChannel };
+
+
+
+
 
 
 
@@ -258,12 +352,17 @@ index.html (frontend)
 
         <button class="navBtn">Proofs</button>
         <button class="navBtn">Support</button>
+        <button class="navBtn" onclick="location.href='/tabs/orders'">Orders</button>
     </div>
 
     <div id="navRight">
         <button id="discordBtn" onclick="window.location='/auth/discord'">Discord</button>
         <button id="loginToggle" onclick="window.location='/login.html'">Login</button>
-
+<div id="cartIcon" onclick="location.href='/tabs/orders'">
+    <img src="/images/cart.png" id="cartImg">
+    <span id="cartCount">0</span>
+</div>
+<script src="/cart.js"></script>
         <div id="profileBox" class="hidden">
             <div id="profileMain">
                 <div class="avatar"></div>
@@ -382,6 +481,9 @@ document.getElementById("logoutBtn").onclick = async () => {
         await fetch("/logout-discord");
 
         resetUI();
+
+        // 🔥 FORCE REDIRECT EVERY TIME
+        window.location.href = "/";
     } catch (err) {
         console.error("Logout error:", err);
     }
@@ -407,7 +509,6 @@ window.isLoggedIn = async function () {
     const user = await res.json();
     return !!user;
 };
-
 
 
 
@@ -637,6 +738,93 @@ button:hover {
 .card, .navBtn, button {
     transition: all 0.3s cubic-bezier(.2,.8,.2,1);
 }
+
+#cartIcon {
+    display:flex;
+    align-items:center;
+    gap:6px;
+    cursor:pointer;
+}
+
+#cartImg {
+    width:22px;
+    height:22px;
+}
+
+#cartCount {
+    font-size:14px;
+}
+
+.cartItem {
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin:10px;
+    background:#14141c;
+    padding:10px;
+    border-radius:10px;
+}
+
+.cartItem img {
+    width:30px;
+    height:30px;
+    object-fit:cover;
+}
+
+
+
+
+
+cart.js
+const CART_KEY = "hades_cart";
+
+function getCart() {
+    return JSON.parse(localStorage.getItem(CART_KEY) || "[]");
+}
+
+function saveCart(cart) {
+    localStorage.setItem(CART_KEY, JSON.stringify(cart));
+    renderCartIcon();
+}
+
+function addToCart(item) {
+    const cart = getCart();
+    const found = cart.find(i => i.name === item.name);
+
+    if (found) {
+        found.qty += item.qty || 1;
+    } else {
+        cart.push({ ...item, qty: 1 });
+    }
+
+    saveCart(cart);
+}
+
+function removeFromCart(name) {
+    let cart = getCart().filter(i => i.name !== name);
+    saveCart(cart);
+}
+
+function changeQty(name, delta) {
+    const cart = getCart();
+    const item = cart.find(i => i.name === name);
+    if (!item) return;
+
+    item.qty += delta;
+    if (item.qty <= 0) removeFromCart(name);
+
+    saveCart(cart);
+}
+
+function renderCartIcon() {
+    const count = getCart().reduce((a,b)=>a+b.qty,0);
+    let icon = document.getElementById("cartIcon");
+    if (!icon) return;
+    const countEl = document.getElementById("cartCount");
+if (countEl) countEl.innerText = count;
+}
+
+window.addEventListener("load", renderCartIcon);
 
 
 
@@ -879,12 +1067,17 @@ mm2.html
 
     <button class="navBtn">Proofs</button>
     <button class="navBtn">Support</button>
+    <button class="navBtn" onclick="location.href='/tabs/orders'">Orders</button>
 </div>
 
 <div id="navRight">
     <button id="discordBtn" onclick="window.location='/auth/discord'">Discord</button>
     <button id="loginToggle">Login</button>
-
+<div id="cartIcon" onclick="location.href='/tabs/orders'">
+    <img src="/images/cart.png" id="cartImg">
+    <span id="cartCount">0</span>
+</div>
+<script src="/cart.js"></script>
     <div id="profileBox" class="hidden">
         <div id="profileMain">
             <div class="avatar"></div>
@@ -982,9 +1175,15 @@ function render() {
     const search = document.getElementById("searchInput")?.value.toLowerCase() || "";
     const mm2 = dataCache.mm2 || {};
 
-    let items = Object.entries(mm2).filter(([name, d]) =>
-        d.stock > 0 && name.toLowerCase().includes(search)
-    );
+    let items = Object.entries(mm2).filter(([name, d]) => {
+    const match = name.toLowerCase().includes(search);
+
+    // If searching, allow all matches
+    if (search) return match;
+
+    // If not searching, only show in-stock
+    return match && d.stock > 0;
+});
 
     const totalPages = Math.ceil(items.length / ITEMS_PER_PAGE);
     if (currentPage > totalPages) currentPage = totalPages || 1;
@@ -995,10 +1194,12 @@ function render() {
     for (let [name, d] of paged) {
         const card = document.createElement("div");
         card.className = "card";
-        card.innerHTML = `
-            <div class="imgBox"><img src="${d.img}"></div>
-            <div class="info"><span class="name">${name}</span></div>
-        `;
+        const imgSrc = d.stock > 0 ? d.img : "/images/nostock.png";
+
+card.innerHTML = `
+    <div class="imgBox"><img src="${imgSrc}"></div>
+    <div class="info"><span class="name">${name}</span></div>
+`;
 
         const info = card.querySelector(".info");
 
@@ -1022,8 +1223,24 @@ function render() {
             };
             info.appendChild(p);
         } else {
-            info.innerHTML += `<div class="stock">Stock: ${d.stock}</div>
-                               <div class="price">₱${d.price}</div>`;
+            info.innerHTML += `
+    <div class="stock">Stock: ${d.stock}</div>
+    <div class="price">₱${d.price}</div>
+    <input type="number" min="1" value="1" class="qtyInput">
+<img src="/images/cart.png" class="addCart">
+`;
+
+const btn = info.querySelector(".addCart");
+const qtyInput = info.querySelector(".qtyInput");
+
+btn.onclick = () => {
+    addToCart({
+        name,
+        price: d.price,
+        img: d.img,
+        qty: parseInt(qtyInput.value) || 1
+    });
+};
         }
 
         container.appendChild(card);
@@ -1073,6 +1290,7 @@ setInterval(() => {
 }, 5000);
 
 })();
+
 
 
 
@@ -1192,4 +1410,132 @@ input.stock-input, input.price-input {
 
 .pagination button:hover {
     background: #4c8dff;
+}
+
+
+
+
+
+/public/tabs/
+orders.html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Orders</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/tabs/orders.css">
+</head>
+<body>
+
+<h1 style="text-align:center">Your Cart</h1>
+<div id="cartView"></div>
+<button id="placeOrder">Place Order</button>
+
+<hr>
+
+<h1 style="text-align:center">Public Orders</h1>
+<div id="ordersList"></div>
+
+<script src="/cart.js"></script>
+<script src="/tabs/orders.js"></script>
+</body>
+</html>
+
+
+
+
+
+order.js
+const ORDER_PASTE = "OQooMS9z";
+
+function renderCart() {
+    const cart = getCart();
+    const box = document.getElementById("cartView");
+    box.innerHTML = "";
+
+    cart.forEach(i => {
+        box.innerHTML += `
+        <div class="cartItem">
+            <img src="${i.img}">
+            ${i.name} x${i.qty}
+            <button onclick="changeQty('${i.name}',1)">+</button>
+            <button onclick="changeQty('${i.name}',-1)">-</button>
+            <button onclick="removeFromCart('${i.name}')">Remove</button>
+        </div>`;
+    });
+}
+renderCart();
+
+document.getElementById("placeOrder").onclick = async () => {
+    const user = await (await fetch("/me")).json();
+    const cart = getCart();
+
+    const order = {
+        user: user.username,
+        discordId: user.id,
+        date: new Date().toISOString(),
+        items: cart,
+        status: "pending"
+    };
+
+    const res = await fetch(`/load/${ORDER_PASTE}`);
+    const json = await res.json();
+    const data = JSON.parse(json.content || "[]");
+
+    data.push(order);
+
+    await fetch(`/save/${ORDER_PASTE}`, {
+        method:"PUT",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ content: JSON.stringify(data,null,2) })
+    });
+
+    localStorage.removeItem("hades_cart");
+    alert("Order placed!");
+};
+
+async function loadOrders() {
+    const res = await fetch(`/load/${ORDER_PASTE}`);
+    const json = await res.json();
+    const orders = JSON.parse(json.content || "[]");
+
+    const me = await (await fetch("/me")).json();
+    const list = document.getElementById("ordersList");
+    list.innerHTML = "";
+
+    orders.forEach((o, i) => {
+        list.innerHTML += `
+        <div class="orderRow">
+            User: ${o.user} | ${o.date}
+            <button onclick="viewOrder(${i})">View Order</button>
+            ${me && me.username === "YOUR_ADMIN_NAME" ? `
+            <button onclick="acceptOrder(${i})">Accept</button>
+            <button onclick="declineOrder(${i})">Decline</button>
+            `:""}
+        </div>`;
+    });
+
+    window._orders = orders;
+}
+loadOrders();
+
+
+
+
+
+orders.css
+.cartItem {
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin:10px;
+    background:#14141c;
+    padding:10px;
+    border-radius:10px;
+}
+
+.cartItem img {
+    width:40px;
+    height:40px;
+    object-fit:cover;
 }
